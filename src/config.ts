@@ -11,6 +11,14 @@ const envConfig = readEnvFile([
   'ONECLI_URL',
   'ONECLI_API_KEY',
   'TZ',
+  'LLM_PROVIDER',
+  'LLM_BASE_URL',
+  'LLM_MODEL',
+  'LLM_AUTH_MODE',
+  'LLM_API_KEY_ENV_VAR',
+  'LLM_HEADERS_JSON',
+  'LLM_TIMEOUT_MS',
+  'ANTHROPIC_FACADE_PORT',
 ]);
 
 export const ASSISTANT_NAME =
@@ -55,6 +63,29 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY =
   process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
+export const LLM_PROVIDER = process.env.LLM_PROVIDER || envConfig.LLM_PROVIDER;
+export const LLM_BASE_URL = process.env.LLM_BASE_URL || envConfig.LLM_BASE_URL;
+export const LLM_MODEL = process.env.LLM_MODEL || envConfig.LLM_MODEL;
+export const LLM_AUTH_MODE =
+  process.env.LLM_AUTH_MODE || envConfig.LLM_AUTH_MODE;
+export const LLM_API_KEY_ENV_VAR =
+  process.env.LLM_API_KEY_ENV_VAR || envConfig.LLM_API_KEY_ENV_VAR;
+export const LLM_HEADERS_JSON =
+  process.env.LLM_HEADERS_JSON || envConfig.LLM_HEADERS_JSON;
+const llmTimeoutParsed = parseInt(
+  process.env.LLM_TIMEOUT_MS || envConfig.LLM_TIMEOUT_MS || '',
+  10,
+);
+export const LLM_TIMEOUT_MS = Number.isFinite(llmTimeoutParsed)
+  ? llmTimeoutParsed
+  : 0;
+const facadePortParsed = parseInt(
+  process.env.ANTHROPIC_FACADE_PORT || envConfig.ANTHROPIC_FACADE_PORT || '3111',
+  10,
+);
+export const ANTHROPIC_FACADE_PORT = Number.isFinite(facadePortParsed)
+  ? facadePortParsed
+  : 3111;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,

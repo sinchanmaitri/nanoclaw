@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 
 import { STORE_DIR } from '../src/config.js';
 import { readEnvFile } from '../src/env.js';
+import { getGlobalLlmConfig, resolveApiKey } from '../src/llm-config.js';
 import { logger } from '../src/logger.js';
 import {
   getPlatform,
@@ -96,13 +97,28 @@ export async function run(_args: string[]): Promise<void> {
     }
   }
 
-  // 3. Check credentials
+  // 3. Check credentials / LLM backend config
   let credentials = 'missing';
-  const envFile = path.join(projectRoot, '.env');
-  if (fs.existsSync(envFile)) {
-    const envContent = fs.readFileSync(envFile, 'utf-8');
-    if (/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|ONECLI_URL)=/m.test(envContent)) {
-      credentials = 'configured';
+  const llm = getGlobalLlmConfig();
+  if (llm.provider === 'openai_compat') {
+    if (llm.baseUrl && llm.model) {
+      if (llm.authMode === 'none') {
+        credentials = 'configured';
+      } else if (llm.authMode === 'api_key' && resolveApiKey(llm.apiKeyEnvVar)) {
+        credentials = 'configured';
+      }
+    }
+  } else {
+    const envFile = path.join(projectRoot, '.env');
+    if (fs.existsSync(envFile)) {
+      const envContent = fs.readFileSync(envFile, 'utf-8');
+      if (
+        /^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|ONECLI_URL)=/m.test(
+          envContent,
+        )
+      ) {
+        credentials = 'configured';
+      }
     }
   }
 
@@ -180,6 +196,8 @@ export async function run(_args: string[]): Promise<void> {
     SERVICE: service,
     CONTAINER_RUNTIME: containerRuntime,
     CREDENTIALS: credentials,
+    LLM_PROVIDER: llm.provider,
+    LLM_MODEL: llm.model || '',
     CONFIGURED_CHANNELS: configuredChannels.join(','),
     CHANNEL_AUTH: JSON.stringify(channelAuth),
     REGISTERED_GROUPS: registeredGroups,

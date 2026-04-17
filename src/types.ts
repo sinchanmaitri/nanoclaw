@@ -30,6 +30,20 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  llm?: LlmConfig;
+}
+
+export type LlmProvider = 'anthropic' | 'openai_compat';
+export type LlmAuthMode = 'onecli' | 'api_key' | 'none';
+
+export interface LlmConfig {
+  provider: LlmProvider;
+  baseUrl?: string;
+  model?: string;
+  authMode: LlmAuthMode;
+  apiKeyEnvVar?: string;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
 }
 
 export interface RegisteredGroup {

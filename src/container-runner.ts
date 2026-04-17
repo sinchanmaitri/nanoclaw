@@ -13,8 +13,6 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
-  ONECLI_API_KEY,
-  ONECLI_URL,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -25,11 +23,11 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
-import { OneCLI } from '@onecli-sh/sdk';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
-
-const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
+import { resolveLlmConfig } from './llm-config.js';
+import { getLlmProviderAdapter } from './llm-provider.js';
+import { LlmConfigError } from './llm-errors.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -244,6 +242,7 @@ function buildVolumeMounts(
 }
 
 async function buildContainerArgs(
+  group: RegisteredGroup,
   mounts: VolumeMount[],
   containerName: string,
   agentIdentifier?: string,
@@ -252,21 +251,6 @@ async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
-
-  // OneCLI gateway handles credential injection — containers never see real secrets.
-  // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
-  const onecliApplied = await onecli.applyContainerConfig(args, {
-    addHostMapping: false, // Nanoclaw already handles host gateway
-    agent: agentIdentifier,
-  });
-  if (onecliApplied) {
-    logger.info({ containerName }, 'OneCLI gateway config applied');
-  } else {
-    logger.warn(
-      { containerName },
-      'OneCLI gateway not reachable — container will have no credentials',
-    );
-  }
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
@@ -288,6 +272,18 @@ async function buildContainerArgs(
       args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
     }
   }
+
+  const llm = resolveLlmConfig(group);
+  const adapter = getLlmProviderAdapter(llm.provider);
+  const validationErrors = adapter.validateConfig(llm);
+  if (validationErrors.length > 0) {
+    throw new LlmConfigError(validationErrors.join('; '));
+  }
+  await adapter.prepareContainerArgs(args, llm, {
+    group,
+    containerName,
+    agentIdentifier,
+  });
 
   args.push(CONTAINER_IMAGE);
 
@@ -312,16 +308,35 @@ export async function runContainerAgent(
   const agentIdentifier = input.isMain
     ? undefined
     : group.folder.toLowerCase().replace(/_/g, '-');
-  const containerArgs = await buildContainerArgs(
-    mounts,
-    containerName,
-    agentIdentifier,
-  );
+  let containerArgs: string[];
+  try {
+    containerArgs = await buildContainerArgs(
+      group,
+      mounts,
+      containerName,
+      agentIdentifier,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(
+      { group: group.name, containerName, err },
+      'Failed to prepare container args for LLM provider',
+    );
+    return {
+      status: 'error',
+      result: null,
+      error: `LLM setup failed: ${message}`,
+    };
+  }
+
+  const llmConfig = resolveLlmConfig(group);
 
   logger.debug(
     {
       group: group.name,
       containerName,
+      llmProvider: llmConfig.provider,
+      llmModel: llmConfig.model || 'default',
       mounts: mounts.map(
         (m) =>
           `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
@@ -337,6 +352,8 @@ export async function runContainerAgent(
       containerName,
       mountCount: mounts.length,
       isMain: input.isMain,
+      llmProvider: llmConfig.provider,
+      llmModel: llmConfig.model || 'default',
     },
     'Spawning container agent',
   );
