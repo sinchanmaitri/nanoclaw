@@ -347,7 +347,15 @@ class AnthropicFacade {
       token = auth.slice('Bearer '.length).trim();
     }
 
-    if (!token) return null;
+    if (!token) {
+      // Some SDK model-discovery calls may not include auth headers.
+      // In single-route mode, default to that route to keep local provider
+      // behavior deterministic.
+      if (this.routes.size === 1) {
+        return this.routes.values().next().value || null;
+      }
+      return null;
+    }
     return this.routes.get(token) || null;
   }
 
