@@ -1,9 +1,6 @@
-import { createHash } from 'crypto';
-
 import { OneCLI } from '@onecli-sh/sdk';
 
-import { ANTHROPIC_FACADE_PORT, ONECLI_API_KEY, ONECLI_URL } from './config.js';
-import { registerOpenAiCompatRoute } from './anthropic-facade.js';
+import { ONECLI_API_KEY, ONECLI_URL } from './config.js';
 import { resolveApiKey, ResolvedLlmConfig, validateLlmConfig } from './llm-config.js';
 import { LlmConfigError } from './llm-errors.js';
 import { logger } from './logger.js';
@@ -35,6 +32,18 @@ export interface LlmProviderAdapter {
 
 function addEnv(args: string[], key: string, value: string): void {
   args.push('-e', `${key}=${value}`);
+}
+
+function mapBaseUrlForContainer(baseUrl: string): string {
+  try {
+    const parsed = new URL(baseUrl);
+    if (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1') {
+      parsed.hostname = 'host.docker.internal';
+    }
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return baseUrl.replace(/\/+$/, '');
+  }
 }
 
 class AnthropicProviderAdapter implements LlmProviderAdapter {
@@ -139,7 +148,7 @@ class OpenAiCompatProviderAdapter implements LlmProviderAdapter {
   async prepareContainerArgs(
     args: string[],
     config: ResolvedLlmConfig,
-    context: LlmProviderContext,
+    _context: LlmProviderContext,
   ): Promise<void> {
     const errors = this.validateConfig(config);
     if (errors.length > 0) {
@@ -163,25 +172,22 @@ class OpenAiCompatProviderAdapter implements LlmProviderAdapter {
       );
     }
 
-    const token = createHash('sha256')
-      .update(
-        `${context.group.folder}|${config.baseUrl}|${config.model}|${config.authMode}`,
-      )
-      .digest('hex')
-      .slice(0, 40);
-
-    registerOpenAiCompatRoute({
-      token,
-      baseUrl: config.baseUrl!,
-      model: config.model!,
-      apiKey: apiKey || undefined,
-      headers: config.headers,
-      timeoutMs: config.timeoutMs,
-    });
-
-    addEnv(args, 'ANTHROPIC_BASE_URL', `http://host.docker.internal:${ANTHROPIC_FACADE_PORT}`);
-    addEnv(args, 'ANTHROPIC_AUTH_TOKEN', token);
-    addEnv(args, 'NANOCLAW_MODEL_OVERRIDE', config.model!);
+    addEnv(
+      args,
+      'NANOCLAW_OPENAI_BASE_URL',
+      mapBaseUrlForContainer(config.baseUrl!),
+    );
+    addEnv(args, 'NANOCLAW_OPENAI_MODEL', config.model!);
+    addEnv(args, 'NANOCLAW_OPENAI_AUTH_MODE', config.authMode);
+    if (apiKey) {
+      addEnv(args, 'NANOCLAW_OPENAI_API_KEY', apiKey);
+    }
+    if (config.headers && Object.keys(config.headers).length > 0) {
+      addEnv(args, 'NANOCLAW_OPENAI_HEADERS_JSON', JSON.stringify(config.headers));
+    }
+    if (config.timeoutMs) {
+      addEnv(args, 'NANOCLAW_PROVIDER_TIMEOUT_MS', String(config.timeoutMs));
+    }
     addEnv(args, 'NANOCLAW_LLM_PROVIDER', 'openai_compat');
   }
 }

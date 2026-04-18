@@ -17,6 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
+import { randomUUID } from 'crypto';
 import {
   query,
   HookCallback,
@@ -58,6 +59,21 @@ interface SDKUserMessage {
   message: { role: 'user'; content: string };
   parent_tool_use_id: null;
   session_id: string;
+}
+
+interface OpenAiCompatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+interface OpenAiCompatChoice {
+  message?: {
+    content?: string | null;
+  };
+}
+
+interface OpenAiCompatResponse {
+  choices?: OpenAiCompatChoice[];
 }
 
 const IPC_INPUT_DIR = '/workspace/ipc/input';
@@ -365,13 +381,76 @@ function waitForIpcMessage(): Promise<string | null> {
   });
 }
 
+const OPENAI_SESSION_DIR = '/workspace/group/.nanoclaw-openai-sessions';
+
+function normalizeSessionId(sessionId: string): string {
+  return sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function getOpenAiSessionPath(sessionId: string): string {
+  return path.join(OPENAI_SESSION_DIR, `${normalizeSessionId(sessionId)}.json`);
+}
+
+function loadOpenAiSessionHistory(sessionId: string): OpenAiCompatMessage[] {
+  try {
+    const filePath = getOpenAiSessionPath(sessionId);
+    if (!fs.existsSync(filePath)) return [];
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item) =>
+        item &&
+        typeof item === 'object' &&
+        (item.role === 'system' || item.role === 'user' || item.role === 'assistant') &&
+        typeof item.content === 'string',
+    ) as OpenAiCompatMessage[];
+  } catch (err) {
+    log(
+      `Failed to read openai_compat session history: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return [];
+  }
+}
+
+function saveOpenAiSessionHistory(
+  sessionId: string,
+  history: OpenAiCompatMessage[],
+): void {
+  try {
+    fs.mkdirSync(OPENAI_SESSION_DIR, { recursive: true });
+    fs.writeFileSync(
+      getOpenAiSessionPath(sessionId),
+      JSON.stringify(history.slice(-40), null, 2),
+    );
+  } catch (err) {
+    log(
+      `Failed to persist openai_compat session history: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+function parseOpenAiHeaders(raw: string | undefined): Record<string, string> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === 'string') headers[k] = v;
+    }
+    return headers;
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
  * allowing agent teams subagents to run to completion.
  * Also pipes IPC messages into the stream during the query.
  */
-async function runQuery(
+async function runAnthropicQuery(
   prompt: string,
   sessionId: string | undefined,
   mcpServerPath: string,
@@ -439,10 +518,7 @@ async function runQuery(
     prompt: stream,
     options: {
       cwd: '/workspace/group',
-      model:
-        process.env.NANOCLAW_LLM_PROVIDER === 'openai_compat'
-          ? undefined
-          : process.env.NANOCLAW_MODEL_OVERRIDE || undefined,
+      model: process.env.NANOCLAW_MODEL_OVERRIDE || undefined,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
@@ -546,6 +622,140 @@ async function runQuery(
     `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
   );
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
+}
+
+async function runOpenAiCompatQuery(
+  prompt: string,
+  sessionId: string | undefined,
+  containerInput: ContainerInput,
+): Promise<{
+  newSessionId?: string;
+  lastAssistantUuid?: string;
+  closedDuringQuery: boolean;
+}> {
+  const baseUrl = process.env.NANOCLAW_OPENAI_BASE_URL;
+  const model = process.env.NANOCLAW_OPENAI_MODEL;
+  const authMode = process.env.NANOCLAW_OPENAI_AUTH_MODE || 'none';
+  const apiKey = process.env.NANOCLAW_OPENAI_API_KEY;
+  const timeoutMs = Number(process.env.NANOCLAW_PROVIDER_TIMEOUT_MS || '30000');
+
+  if (!baseUrl) {
+    throw new Error(
+      'openai_compat provider missing NANOCLAW_OPENAI_BASE_URL in container environment',
+    );
+  }
+  if (!model) {
+    throw new Error(
+      'openai_compat provider missing NANOCLAW_OPENAI_MODEL in container environment',
+    );
+  }
+  if (authMode === 'api_key' && !apiKey) {
+    throw new Error(
+      'openai_compat authMode=api_key but NANOCLAW_OPENAI_API_KEY is missing',
+    );
+  }
+
+  const currentSessionId = sessionId || randomUUID();
+  const systemPrompt = !containerInput.isMain
+    ? (() => {
+        const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
+        if (!fs.existsSync(globalClaudeMdPath)) return undefined;
+        const text = fs.readFileSync(globalClaudeMdPath, 'utf-8').trim();
+        return text || undefined;
+      })()
+    : undefined;
+
+  const history = loadOpenAiSessionHistory(currentSessionId);
+  const messages: OpenAiCompatMessage[] = [
+    ...(systemPrompt && history.every((m) => m.role !== 'system')
+      ? [{ role: 'system', content: systemPrompt } as OpenAiCompatMessage]
+      : []),
+    ...history,
+    { role: 'user', content: prompt },
+  ];
+
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    ...parseOpenAiHeaders(process.env.NANOCLAW_OPENAI_HEADERS_JSON),
+  };
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(
+      `${baseUrl.replace(/\/+$/, '')}/chat/completions`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          messages,
+          stream: false,
+        }),
+        signal: controller.signal,
+      },
+    );
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `openai_compat upstream failed (${response.status}): ${body.slice(0, 500)}`,
+      );
+    }
+
+    const json = (await response.json()) as OpenAiCompatResponse;
+    const text = json.choices?.[0]?.message?.content?.trim() || '';
+
+    saveOpenAiSessionHistory(currentSessionId, [
+      ...messages,
+      { role: 'assistant', content: text },
+    ]);
+
+    writeOutput({
+      status: 'success',
+      result: text || null,
+      newSessionId: currentSessionId,
+    });
+
+    log(
+      `openai_compat result emitted (${text.length} chars, session: ${currentSessionId})`,
+    );
+
+    return {
+      newSessionId: currentSessionId,
+      lastAssistantUuid: undefined,
+      closedDuringQuery: false,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function runQuery(
+  prompt: string,
+  sessionId: string | undefined,
+  mcpServerPath: string,
+  containerInput: ContainerInput,
+  sdkEnv: Record<string, string | undefined>,
+  resumeAt?: string,
+): Promise<{
+  newSessionId?: string;
+  lastAssistantUuid?: string;
+  closedDuringQuery: boolean;
+}> {
+  const provider = process.env.NANOCLAW_LLM_PROVIDER || 'anthropic';
+  if (provider === 'openai_compat') {
+    return runOpenAiCompatQuery(prompt, sessionId, containerInput);
+  }
+  return runAnthropicQuery(
+    prompt,
+    sessionId,
+    mcpServerPath,
+    containerInput,
+    sdkEnv,
+    resumeAt,
+  );
 }
 
 interface ScriptResult {
