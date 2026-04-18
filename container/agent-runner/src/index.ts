@@ -444,6 +444,25 @@ function parseOpenAiHeaders(raw: string | undefined): Record<string, string> {
   }
 }
 
+function loadOpenAiSystemPrompt(): string | undefined {
+  const parts: string[] = [];
+
+  const groupPath = '/workspace/group/CLAUDE.md';
+  if (fs.existsSync(groupPath)) {
+    const text = fs.readFileSync(groupPath, 'utf-8').trim();
+    if (text) parts.push(text);
+  }
+
+  const globalPath = '/workspace/global/CLAUDE.md';
+  if (fs.existsSync(globalPath)) {
+    const text = fs.readFileSync(globalPath, 'utf-8').trim();
+    if (text) parts.push(text);
+  }
+
+  if (parts.length === 0) return undefined;
+  return parts.join('\n\n');
+}
+
 /**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
@@ -627,7 +646,7 @@ async function runAnthropicQuery(
 async function runOpenAiCompatQuery(
   prompt: string,
   sessionId: string | undefined,
-  containerInput: ContainerInput,
+  _containerInput: ContainerInput,
 ): Promise<{
   newSessionId?: string;
   lastAssistantUuid?: string;
@@ -656,14 +675,7 @@ async function runOpenAiCompatQuery(
   }
 
   const currentSessionId = sessionId || randomUUID();
-  const systemPrompt = !containerInput.isMain
-    ? (() => {
-        const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-        if (!fs.existsSync(globalClaudeMdPath)) return undefined;
-        const text = fs.readFileSync(globalClaudeMdPath, 'utf-8').trim();
-        return text || undefined;
-      })()
-    : undefined;
+  const systemPrompt = loadOpenAiSystemPrompt();
 
   const history = loadOpenAiSessionHistory(currentSessionId);
   const messages: OpenAiCompatMessage[] = [
