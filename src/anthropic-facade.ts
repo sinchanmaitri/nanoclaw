@@ -63,7 +63,9 @@ function normalizeSystemText(system: unknown): string | undefined {
   if (typeof system === 'string') return system;
   if (!Array.isArray(system)) return undefined;
   return system
-    .filter((block) => block && typeof block === 'object' && block.type === 'text')
+    .filter(
+      (block) => block && typeof block === 'object' && block.type === 'text',
+    )
     .map((block) => (typeof block.text === 'string' ? block.text : ''))
     .join('\n')
     .trim();
@@ -117,13 +119,20 @@ function anthropicMessagesToOpenAi(body: any): OpenAiChatMessage[] {
           },
         });
       } else if (block?.type === 'tool_result') {
-        toolResults.push({ id: block.tool_use_id || '', content: block.content });
+        toolResults.push({
+          id: block.tool_use_id || '',
+          content: block.content,
+        });
       }
     }
 
     const text = textParts.join('\n').trim();
     if (toolCalls.length > 0) {
-      out.push({ role: 'assistant', content: text || null, tool_calls: toolCalls });
+      out.push({
+        role: 'assistant',
+        content: text || null,
+        tool_calls: toolCalls,
+      });
     } else {
       out.push({ role, content: text || '' });
     }
@@ -177,9 +186,7 @@ function parseJsonSafe(value: string | undefined): unknown {
   }
 }
 
-function openAiToAnthropicMessage(
-  response: OpenAiCompletionResponse,
-): {
+function openAiToAnthropicMessage(response: OpenAiCompletionResponse): {
   id: string;
   type: 'message';
   role: 'assistant';
@@ -344,6 +351,33 @@ class AnthropicFacade {
     return this.routes.get(token) || null;
   }
 
+  private buildAnthropicModels(route: OpenAiCompatRoute): {
+    data: Array<{
+      type: 'model';
+      id: string;
+      display_name: string;
+      created_at: string;
+    }>;
+  } {
+    const now = new Date().toISOString();
+    const ids = new Set<string>([
+      route.model,
+      // Common SDK defaults. We accept these and still route to route.model.
+      'claude-sonnet-4-6',
+      'claude-sonnet-4-5',
+      'claude-opus-4-1',
+      'claude-haiku-3-5',
+    ]);
+    return {
+      data: Array.from(ids).map((id) => ({
+        type: 'model',
+        id,
+        display_name: id,
+        created_at: now,
+      })),
+    };
+  }
+
   private start(): void {
     this.started = true;
     createServer(async (req, res) => {
@@ -356,6 +390,20 @@ class AnthropicFacade {
         if (req.url === '/health') {
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ ok: true, routes: this.routes.size }));
+          return;
+        }
+
+        if (req.method === 'GET' && req.url === '/v1/models') {
+          const route = this.getRouteFromRequest(req);
+          if (!route) {
+            res.writeHead(401, { 'content-type': 'application/json' });
+            res.end(
+              JSON.stringify({ error: { type: 'authentication_error' } }),
+            );
+            return;
+          }
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(this.buildAnthropicModels(route)));
           return;
         }
 

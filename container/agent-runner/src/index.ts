@@ -439,7 +439,10 @@ async function runQuery(
     prompt: stream,
     options: {
       cwd: '/workspace/group',
-      model: process.env.NANOCLAW_MODEL_OVERRIDE || undefined,
+      model:
+        process.env.NANOCLAW_LLM_PROVIDER === 'openai_compat'
+          ? undefined
+          : process.env.NANOCLAW_MODEL_OVERRIDE || undefined,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
